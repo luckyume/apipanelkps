@@ -2,47 +2,123 @@ import os
 import json
 import threading
 import time
+from typing import Optional
+
 import serial
+from serial import SerialException
 
 
 class ESP32Service:
 
     def __init__(self):
-        self.port = os.getenv("ESP32_PORT", "COM5")
-        self.baudrate = int(os.getenv("ESP32_BAUDRATE", "115200"))
+        # =====================================================
+        # CONFIG
+        # =====================================================
 
-        self.serial = None
+        self.port = os.getenv(
+            "ESP32_PORT",
+            "COM28"
+        )
 
-        self.lock = threading.Lock()
+        self.baudrate = int(
+            os.getenv(
+                "ESP32_BAUDRATE",
+                "115200"
+            )
+        )
 
-        self.latest_status = {
-            "connected": False,
-            "tracker": False,
-            "hm30": False,
-            "relay": False,
-            "voltage1": 0.0,
-            "voltage2": 0.0,
-            "current1": 0.0,
-            "current2": 0.0,
-            "power": 0.0,
-            "ac_voltage": None,
-            "ac_current": None,
-            "ac_power": None,
-            "ac_energy": None,
-            "uptime": 0,
-        }
+        self.timeout = float(
+            os.getenv(
+                "ESP32_TIMEOUT",
+                "0.2"
+            )
+        )
+
+        self.status_timeout = float(
+            os.getenv(
+                "ESP32_STATUS_TIMEOUT",
+                "2.0"
+            )
+        )
+
+        # =====================================================
+        # SERIAL
+        # =====================================================
+
+        self.serial: Optional[serial.Serial] = None
+
+        self.serial_lock = threading.Lock()
+
+        self.status_condition = threading.Condition()
 
         self.running = True
 
+        # Waktu terakhir menerima JSON status
+        self.last_status_time = 0.0
+
+        # Counter status
+        self.status_counter = 0
+
+        # =====================================================
+        # STATUS DEFAULT
+        # =====================================================
+
+        self.latest_status = {
+            "ok": False,
+            "type": "status",
+
+            "connected": False,
+
+            "tracker": {
+                "enabled": False,
+                "voltage": 0.0,
+                "current": 0.0,
+                "power": 0.0,
+            },
+
+            "hm30": {
+                "enabled": False,
+                "voltage": 0.0,
+                "current": 0.0,
+                "power": 0.0,
+            },
+
+            "total_power": 0.0,
+
+            "energy_kwh": 0.0,
+
+            "ac": {
+                "valid": False,
+                "voltage": 0.0,
+                "current": 0.0,
+                "power": 0.0,
+                "energy": 0.0,
+            },
+
+            "relay_protection": False,
+
+            "alarm": None,
+
+            "last_update": None,
+        }
+
+        # =====================================================
+        # CONNECT
+        # =====================================================
+
         self._connect()
+
+        # =====================================================
+        # READER THREAD
+        # =====================================================
 
         self.reader_thread = threading.Thread(
             target=self._reader_loop,
-            daemon=True
+            daemon=True,
+            name="ESP32-Serial-Reader"
         )
 
         self.reader_thread.start()
-
 
     # =========================================================
     # CONNECT
@@ -52,47 +128,101 @@ class ESP32Service:
 
         try:
 
+            # Tutup koneksi lama jika ada
+            if self.serial is not None:
+
+                try:
+                    self.serial.close()
+
+                except Exception:
+                    pass
+
+                self.serial = None
+
             self.serial = serial.Serial(
                 port=self.port,
                 baudrate=self.baudrate,
-                timeout=0.2,
+                timeout=self.timeout,
+                write_timeout=1.0
             )
 
-            self.latest_status["connected"] = True
+            # Bersihkan buffer
+            try:
+                self.serial.reset_input_buffer()
+                self.serial.reset_output_buffer()
+
+            except Exception:
+                pass
+
+            with self.status_condition:
+
+                self.latest_status["connected"] = True
+
+                self.status_condition.notify_all()
 
             print(
                 f"[ESP32] Connected: "
                 f"{self.port} @ {self.baudrate}"
             )
 
-        except Exception as e:
+            return True
+
+        except Exception as exc:
 
             self.serial = None
 
-            self.latest_status["connected"] = False
+            with self.status_condition:
+
+                self.latest_status["connected"] = False
+
+                self.status_condition.notify_all()
 
             print(
-                f"[ESP32] Connection failed: {e}"
+                f"[ESP32] Connection failed: {exc}"
             )
 
+            return False
 
     # =========================================================
-    # RECONNECT
+    # ENSURE CONNECTION
     # =========================================================
 
     def _ensure_connection(self):
 
         if self.serial is not None:
-            if self.serial.is_open:
-                return True
 
-        self._connect()
+            try:
 
-        return self.serial is not None
+                if self.serial.is_open:
 
+                    return True
+
+            except Exception:
+                pass
+
+        return self._connect()
 
     # =========================================================
-    # READER
+    # CLOSE SERIAL
+    # =========================================================
+
+    def _close_serial(self):
+
+        try:
+
+            if self.serial is not None:
+
+                self.serial.close()
+
+        except Exception:
+            pass
+
+        finally:
+
+            self.serial = None
+
+    # =========================================================
+    # READER LOOP
     # =========================================================
 
     def _reader_loop(self):
@@ -102,37 +232,45 @@ class ESP32Service:
             try:
 
                 if not self._ensure_connection():
+
                     time.sleep(2)
+
                     continue
 
+                # =============================================
+                # BACA 1 BARIS
+                # =============================================
 
                 line = self.serial.readline()
 
-
                 if not line:
-                    continue
 
+                    continue
 
                 text = line.decode(
                     "utf-8",
                     errors="ignore"
                 ).strip()
 
-
                 if not text:
+
                     continue
 
-
-                # ESP32 juga mengirim log seperti:
-                # [ESP32] READY
-                # [HM30] Power ON
-                #
-                # Hanya proses JSON.
+                # =============================================
+                # LOG BIASA
+                # =============================================
 
                 if not text.startswith("{"):
-                    print(f"[ESP32] {text}")
+
+                    print(
+                        f"[ESP32] {text}"
+                    )
+
                     continue
 
+                # =============================================
+                # JSON
+                # =============================================
 
                 try:
 
@@ -146,53 +284,261 @@ class ESP32Service:
 
                     continue
 
+                # =============================================
+                # STATUS
+                # =============================================
 
-                if data.get("type") != "status":
+                if data.get("type") == "status":
+
+                    self._update_status(
+                        data
+                    )
+
                     continue
 
+                # =============================================
+                # RESPONSE COMMAND
+                # =============================================
 
-                with self.lock:
+                if data.get("ok") is not None:
 
-                    self.latest_status.update(data)
+                    print(
+                        f"[ESP32] Response: {data}"
+                    )
 
-                    self.latest_status[
-                        "connected"
-                    ] = True
+                    continue
 
-
-            except Exception as e:
+            except (
+                SerialException,
+                OSError,
+                UnicodeDecodeError
+            ) as exc:
 
                 print(
-                    f"[ESP32] Reader error: {e}"
+                    f"[ESP32] Serial error: {exc}"
                 )
 
-
-                with self.lock:
+                with self.status_condition:
 
                     self.latest_status[
                         "connected"
                     ] = False
 
+                    self.status_condition.notify_all()
 
-                try:
-
-                    if self.serial:
-                        self.serial.close()
-
-                except Exception:
-                    pass
-
-
-                self.serial = None
+                self._close_serial()
 
                 time.sleep(2)
 
+            except Exception as exc:
+
+                print(
+                    f"[ESP32] Reader error: {exc}"
+                )
+
+                with self.status_condition:
+
+                    self.latest_status[
+                        "connected"
+                    ] = False
+
+                    self.status_condition.notify_all()
+
+                time.sleep(1)
+
+    # =========================================================
+    # UPDATE STATUS
+    # =========================================================
+
+    def _update_status(
+        self,
+        data: dict
+    ):
+
+        with self.status_condition:
+
+            # -----------------------------------------------
+            # Jangan replace seluruh object secara buta.
+            # Kita normalisasi supaya API selalu punya struktur
+            # yang konsisten.
+            # -----------------------------------------------
+
+            tracker = data.get(
+                "tracker",
+                {}
+            )
+
+            hm30 = data.get(
+                "hm30",
+                {}
+            )
+
+            ac = data.get(
+                "ac",
+                {}
+            )
+
+            self.latest_status = {
+
+                "ok": bool(
+                    data.get(
+                        "ok",
+                        True
+                    )
+                ),
+
+                "type": "status",
+
+                "connected": True,
+
+                "tracker": {
+                    "enabled": bool(
+                        tracker.get(
+                            "enabled",
+                            False
+                        )
+                    ),
+
+                    "voltage": float(
+                        tracker.get(
+                            "voltage",
+                            0.0
+                        ) or 0.0
+                    ),
+
+                    "current": float(
+                        tracker.get(
+                            "current",
+                            0.0
+                        ) or 0.0
+                    ),
+
+                    "power": float(
+                        tracker.get(
+                            "power",
+                            0.0
+                        ) or 0.0
+                    ),
+                },
+
+                "hm30": {
+                    "enabled": bool(
+                        hm30.get(
+                            "enabled",
+                            False
+                        )
+                    ),
+
+                    "voltage": float(
+                        hm30.get(
+                            "voltage",
+                            0.0
+                        ) or 0.0
+                    ),
+
+                    "current": float(
+                        hm30.get(
+                            "current",
+                            0.0
+                        ) or 0.0
+                    ),
+
+                    "power": float(
+                        hm30.get(
+                            "power",
+                            0.0
+                        ) or 0.0
+                    ),
+                },
+
+                "total_power": float(
+                    data.get(
+                        "total_power",
+                        0.0
+                    ) or 0.0
+                ),
+
+                "energy_kwh": float(
+                    data.get(
+                        "energy_kwh",
+                        0.0
+                    ) or 0.0
+                ),
+
+                "ac": {
+                    "valid": bool(
+                        ac.get(
+                            "valid",
+                            False
+                        )
+                    ),
+
+                    "voltage": float(
+                        ac.get(
+                            "voltage",
+                            0.0
+                        ) or 0.0
+                    ),
+
+                    "current": float(
+                        ac.get(
+                            "current",
+                            0.0
+                        ) or 0.0
+                    ),
+
+                    "power": float(
+                        ac.get(
+                            "power",
+                            0.0
+                        ) or 0.0
+                    ),
+
+                    "energy": float(
+                        ac.get(
+                            "energy",
+                            0.0
+                        ) or 0.0
+                    ),
+                },
+
+                "relay_protection": bool(
+                    data.get(
+                        "relay_protection",
+                        False
+                    )
+                ),
+
+                "alarm": data.get(
+                    "alarm",
+                    None
+                ),
+
+                "last_update": time.time(),
+            }
+
+            self.last_status_time = time.time()
+
+            self.status_counter += 1
+
+            self.status_condition.notify_all()
 
     # =========================================================
     # SEND COMMAND
     # =========================================================
 
-    def send_command(self, command: str):
+    def send_command(
+        self,
+        command: str
+    ):
+
+        command = command.strip()
+
+        if not command:
+
+            raise RuntimeError(
+                "Command ESP32 kosong"
+            )
 
         if not self._ensure_connection():
 
@@ -200,24 +546,135 @@ class ESP32Service:
                 "ESP32 tidak terhubung"
             )
 
+        with self.serial_lock:
 
-        command = command.strip()
+            try:
 
+                # -------------------------------------------
+                # Bersihkan input buffer.
+                #
+                # Jangan hapus terlalu agresif karena reader
+                # thread bisa sedang membaca status.
+                # -------------------------------------------
 
-        with self.lock:
+                payload = (
+                    command + "\n"
+                ).encode(
+                    "utf-8"
+                )
 
-            self.serial.write(
-                (command + "\n").encode("utf-8")
-            )
+                self.serial.write(
+                    payload
+                )
 
-            self.serial.flush()
+                self.serial.flush()
 
+            except Exception as exc:
+
+                self._close_serial()
+
+                with self.status_condition:
+
+                    self.latest_status[
+                        "connected"
+                    ] = False
+
+                    self.status_condition.notify_all()
+
+                raise RuntimeError(
+                    f"Gagal mengirim command ke ESP32: {exc}"
+                ) from exc
 
         return {
             "success": True,
-            "command": command
+            "command": command,
         }
 
+    # =========================================================
+    # REQUEST STATUS
+    # =========================================================
+
+    def request_status(self):
+
+        if not self._ensure_connection():
+
+            raise RuntimeError(
+                "ESP32 tidak terhubung"
+            )
+
+        # Ambil counter sebelum request.
+        with self.status_condition:
+
+            old_counter = (
+                self.status_counter
+            )
+
+        # =============================================
+        # KIRIM STATUS
+        # =============================================
+
+        self.send_command(
+            "STATUS"
+        )
+
+        # =============================================
+        # TUNGGU ESP32 MEMBALAS
+        # =============================================
+
+        deadline = (
+            time.monotonic()
+            + self.status_timeout
+        )
+
+        with self.status_condition:
+
+            while (
+                self.status_counter
+                <= old_counter
+            ):
+
+                remaining = (
+                    deadline
+                    - time.monotonic()
+                )
+
+                if remaining <= 0:
+
+                    break
+
+                self.status_condition.wait(
+                    timeout=remaining
+                )
+
+            # =========================================
+            # Cek apakah mendapat status baru
+            # =========================================
+
+            if (
+                self.status_counter
+                > old_counter
+            ):
+
+                return dict(
+                    self.latest_status
+                )
+
+            # =========================================
+            # Timeout
+            # =========================================
+
+            # Kalau sebelumnya pernah punya status,
+            # tetap kembalikan status terakhir tetapi tandai
+            # bahwa request terbaru timeout.
+            status = dict(
+                self.latest_status
+            )
+
+            status[
+                "status_request_timeout"
+            ] = True
+
+            return status
 
     # =========================================================
     # GET STATUS
@@ -225,12 +682,7 @@ class ESP32Service:
 
     def get_status(self):
 
-        with self.lock:
-
-            return dict(
-                self.latest_status
-            )
-
+        return self.request_status()
 
     # =========================================================
     # TRACKER
@@ -239,16 +691,42 @@ class ESP32Service:
     def tracker_on(self):
 
         return self.send_command(
-            "TRACKER_ON"
+            "TRACKER ON"
         )
-
 
     def tracker_off(self):
 
         return self.send_command(
-            "TRACKER_OFF"
+            "TRACKER OFF"
         )
 
+    def set_tracker(
+        self,
+        state: bool
+    ):
+
+        if state:
+
+            result = self.tracker_on()
+
+        else:
+
+            result = self.tracker_off()
+
+        # Ambil status terbaru setelah command.
+        try:
+
+            status = self.request_status()
+
+            result["status"] = status
+
+        except Exception as exc:
+
+            result["status_error"] = str(
+                exc
+            )
+
+        return result
 
     # =========================================================
     # HM30
@@ -257,34 +735,65 @@ class ESP32Service:
     def hm30_on(self):
 
         return self.send_command(
-            "HM30_ON"
+            "HM30 ON"
         )
-
 
     def hm30_off(self):
 
         return self.send_command(
-            "HM30_OFF"
+            "HM30 OFF"
         )
 
+    def set_hm30(
+        self,
+        state: bool
+    ):
+
+        if state:
+
+            result = self.hm30_on()
+
+        else:
+
+            result = self.hm30_off()
+
+        # Ambil status terbaru setelah command.
+        try:
+
+            status = self.request_status()
+
+            result["status"] = status
+
+        except Exception as exc:
+
+            result["status_error"] = str(
+                exc
+            )
+
+        return result
 
     # =========================================================
     # RELAY
+    #
+    # ESP32 yang Anda kirim saat ini BELUM mempunyai command:
+    # RELAY ON / RELAY OFF.
+    #
+    # Fungsi ini dipertahankan untuk kompatibilitas API,
+    # tetapi jangan digunakan sebelum command tersebut
+    # ditambahkan di ESP32.
     # =========================================================
 
     def relay_on(self):
 
         return self.send_command(
-            "RELAY_ON"
+            "RELAY ON"
         )
-
 
     def relay_off(self):
 
         return self.send_command(
-            "RELAY_OFF"
+            "RELAY OFF"
         )
-
 
     # =========================================================
     # CLOSE
@@ -294,13 +803,15 @@ class ESP32Service:
 
         self.running = False
 
-        try:
+        self._close_serial()
 
-            if self.serial:
-                self.serial.close()
+        with self.status_condition:
 
-        except Exception:
-            pass
+            self.latest_status[
+                "connected"
+            ] = False
+
+            self.status_condition.notify_all()
 
 
 # =============================================================
