@@ -17,7 +17,7 @@ class ESP32Service:
 
         self.port = os.getenv(
             "ESP32_PORT",
-            "COM28"
+            "/dev/ttyACM1"
         )
 
         self.baudrate = int(
