@@ -502,6 +502,33 @@ class ESP32Service:
                     ),
                 },
 
+                "ssr1": {
+                    "enabled": bool(
+                        data.get(
+                            "ssr1",
+                            False
+                        )
+                    ),
+                },
+
+                "ssr2": {
+                    "enabled": bool(
+                        data.get(
+                            "ssr2",
+                            False
+                        )
+                    ),
+                },
+
+                "relay": {
+                    "enabled": bool(
+                        data.get(
+                            "relay",
+                            False
+                        )
+                    ),
+                },
+
                 "relay_protection": bool(
                     data.get(
                         "relay_protection",
@@ -773,27 +800,183 @@ class ESP32Service:
         return result
 
     # =========================================================
-    # RELAY
-    #
-    # ESP32 yang Anda kirim saat ini BELUM mempunyai command:
-    # RELAY ON / RELAY OFF.
-    #
-    # Fungsi ini dipertahankan untuk kompatibilitas API,
-    # tetapi jangan digunakan sebelum command tersebut
-    # ditambahkan di ESP32.
+    # SSR1
     # =========================================================
 
-    def relay_on(self):
+    def ssr1_on(self):
 
         return self.send_command(
-            "RELAY ON"
+            "SSR1 ON"
         )
 
-    def relay_off(self):
+    def ssr1_off(self):
 
         return self.send_command(
-            "RELAY OFF"
+            "SSR1 OFF"
         )
+
+    def set_ssr1(
+        self,
+        state: bool
+    ):
+
+        if state:
+
+            result = self.ssr1_on()
+
+        else:
+
+            result = self.ssr1_off()
+
+        try:
+
+            status = self.request_status()
+
+            result["status"] = status
+
+        except Exception as exc:
+
+            result["status_error"] = str(
+                exc
+            )
+
+        return result
+
+    # =========================================================
+    # SSR2
+    # =========================================================
+
+    def ssr2_on(self):
+
+        return self.send_command(
+            "SSR2 ON"
+        )
+
+    def ssr2_off(self):
+
+        return self.send_command(
+            "SSR2 OFF"
+        )
+
+    def set_ssr2(
+        self,
+        state: bool
+    ):
+
+        if state:
+
+            result = self.ssr2_on()
+
+        else:
+
+            result = self.ssr2_off()
+
+        try:
+
+            status = self.request_status()
+
+            result["status"] = status
+
+        except Exception as exc:
+
+            result["status_error"] = str(
+                exc
+            )
+
+        return result
+
+    # =========================================================
+    # RELAY
+    # =========================================================
+
+   # =========================================================
+# SSR1
+# =========================================================
+
+def set_ssr1(self, state: bool):
+
+    command = json.dumps({
+        "device": "ssr1",
+        "state": state
+    })
+
+    result = self.send_command(command)
+
+    try:
+        result["status"] = self.request_status()
+    except Exception as exc:
+        result["status_error"] = str(exc)
+
+    return result
+
+
+# =========================================================
+# SSR2
+# =========================================================
+
+def set_ssr2(self, state: bool):
+
+    command = json.dumps({
+        "device": "ssr2",
+        "state": state
+    })
+
+    result = self.send_command(command)
+
+    try:
+        result["status"] = self.request_status()
+    except Exception as exc:
+        result["status_error"] = str(exc)
+
+    return result
+
+
+# =========================================================
+# RELAY
+# =========================================================
+
+def set_relay(self, state: bool):
+
+    command = json.dumps({
+        "device": "relay",
+        "state": state
+    })
+
+    result = self.send_command(command)
+
+    try:
+        result["status"] = self.request_status()
+    except Exception as exc:
+        result["status_error"] = str(exc)
+
+    return result
+
+    def set_relay(
+        self,
+        state: bool
+    ):
+
+        if state:
+
+            result = self.relay_on()
+
+        else:
+
+            result = self.relay_off()
+
+        try:
+
+            status = self.request_status()
+
+            result["status"] = status
+
+        except Exception as exc:
+
+            result["status_error"] = str(
+                exc
+            )
+
+        return result
 
     # =========================================================
     # CLOSE

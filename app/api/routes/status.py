@@ -131,3 +131,70 @@ def control_hm30(
                 "error": str(exc),
             }
         ) from exc
+    # =============================================================
+# SSR1
+# =============================================================
+
+@router.post(
+    "/control/ssr1"
+)
+def control_ssr1(
+    request: ControlRequest
+) -> dict[str, Any]:
+
+    try:
+        return esp32_service.set_ssr1(
+            request.state
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc)
+        ) from exc
+
+
+# =============================================================
+# SSR2
+# =============================================================
+
+@router.post(
+    "/control/ssr2"
+)
+def control_ssr2(
+    request: ControlRequest
+) -> dict[str, Any]:
+
+    try:
+        return esp32_service.set_ssr2(
+            request.state
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc)
+        ) from exc
+
+
+# =============================================================
+# RELAY
+# =============================================================
+
+@router.post(
+    "/control/relay"
+)
+def control_relay(
+    request: ControlRequest
+) -> dict[str, Any]:
+
+    try:
+        return esp32_service.set_relay(
+            request.state
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc)
+        ) from exc
