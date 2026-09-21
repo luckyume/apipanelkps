@@ -7,16 +7,22 @@ from typing import Optional
 import serial
 from serial import SerialException
 
-class ESP32Service:
+# --- TAMBAHAN WAJIB AGAR PYTHON MEMBACA FILE .ENV TERBARU ---
+from dotenv import load_dotenv
+load_dotenv("/home/panelkopasus/apipanelkps/.env")
+# ------------------------------------------------------------
 
+class ESP32Service:
     def __init__(self):
         # =====================================================
         # CONFIG
         # =====================================================
         self.port = os.getenv("ESP32_PORT", "/dev/ttyUSB0")
         self.baudrate = int(os.getenv("ESP32_BAUDRATE", "115200"))
+        
         self.timeout = float(os.getenv("ESP32_TIMEOUT", "0.2"))
         self.status_timeout = float(os.getenv("ESP32_STATUS_TIMEOUT", "2.0"))
+        # ------------------------------------------------------
 
         # =====================================================
         # SERIAL
@@ -28,7 +34,6 @@ class ESP32Service:
 
         self.last_status_time = 0.0
         self.status_counter = 0
-
         # =====================================================
         # STATUS DEFAULT
         # =====================================================
@@ -57,6 +62,44 @@ class ESP32Service:
             name="ESP32-Serial-Reader"
         )
         self.reader_thread.start()
+
+        # =====================================================
+        # AUTO START SSR1 & SSR2 KETIKA BOOT
+        # =====================================================
+        self.startup_thread = threading.Thread(
+            target=self._startup_sequence,
+            daemon=True,
+            name="ESP32-Startup-Sequence"
+        )
+        self.startup_thread.start()
+
+    def _startup_sequence(self):
+        """
+        Fungsi ini berjalan saat inisialisasi API.
+        Memberikan jeda agar ESP32 selesai boot setelah koneksi serial, 
+        lalu menembak SSR1, jeda 1 detik, lalu menembak SSR2.
+        """
+        print("[ESP32] Menunggu ESP32 siap untuk auto-start SSR...")
+        # Jeda 3 detik karena saat serial connect, ESP32 hardware akan auto-reset
+        time.sleep(10)
+        
+        try:
+            print("[ESP32] Mengirim perintah True untuk SSR1 (BOOT1)...")
+            self.set_ssr1(True)
+            
+            # Beri jeda 1 detik agar serial tidak bertabrakan
+            time.sleep(1)
+            print("[ESP32] Mengirim perintah True untuk SSR1 (BOOT2)...")
+            self.set_ssr1(True)
+            
+            # Beri jeda 1 detik agar serial tidak bertabrakan
+            time.sleep(1)
+            print("[ESP32] Mengirim perintah True untuk SSR2 (BOOT)...")
+            self.set_ssr2(True)
+            
+            print("[ESP32] Auto-start SSR1 dan SSR2 berhasil dikirim.")
+        except Exception as e:
+            print(f"[ESP32] Gagal mengirim auto-start SSR saat boot: {e}")
 
     def _connect(self):
         try:
@@ -194,7 +237,8 @@ class ESP32Service:
                 },
                 "ssr1": {"enabled": bool(data.get("ssr1", False))},
                 "ssr2": {"enabled": bool(data.get("ssr2", False))},
-                "relay": {"enabled": bool(data.get("relay", False))},
+                # Relay Active-Low: jika ESP32 kirim false (LOW), berarti relay nyala (True)
+                "relay": {"enabled": not bool(data.get("relay", False))},
                 "relay_protection": bool(data.get("relay_protection", False)),
                 "alarm": data.get("alarm", None),
                 "last_update": time.time(),
@@ -279,7 +323,6 @@ class ESP32Service:
     # SSR1
     # =========================================================
     def set_ssr1(self, state: bool):
-        # Kunci perubahan: Mengirim bentuk string JSON tanpa spasi
         command = json.dumps({"device": "ssr1", "state": state}, separators=(',', ':'))
         result = self.send_command(command)
         try:
@@ -292,7 +335,6 @@ class ESP32Service:
     # SSR2
     # =========================================================
     def set_ssr2(self, state: bool):
-        # Kunci perubahan: Mengirim bentuk string JSON tanpa spasi
         command = json.dumps({"device": "ssr2", "state": state}, separators=(',', ':'))
         result = self.send_command(command)
         try:
@@ -305,21 +347,14 @@ class ESP32Service:
     # RELAY
     # =========================================================
     def set_relay(self, state: bool):
-        # Kunci perubahan: Mengirim bentuk string JSON tanpa spasi
-        command = json.dumps({"device": "relay", "state": state}, separators=(',', ':'))
+        # Relay active-low: API TRUE (ingin nyala) -> kirim FALSE; API FALSE (ingin mati) -> kirim TRUE
+        command = json.dumps({"device": "relay", "state": not state}, separators=(',', ':'))
         result = self.send_command(command)
         try:
             result["status"] = self.request_status()
         except Exception as exc:
             result["status_error"] = str(exc)
         return result
-
-    def close(self):
-        self.running = False
-        self._close_serial()
-        with self.status_condition:
-            self.latest_status["connected"] = False
-            self.status_condition.notify_all()
 
 # =============================================================
 # SINGLE ESP32 SERVICE INSTANCE
